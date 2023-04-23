@@ -1,0 +1,2 @@
+pygments==2.15.1
+ujson==5.7.0
