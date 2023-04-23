@@ -21,6 +21,7 @@ class ConfigurationKey(Enum):
     SOURCE_PATH = "source_location"
     COMPILE_COMMANDS_LOCATION = "compile_commands"
     QUIET = "quiet"
+    VERBOSE = "verbose"
 
 
 T = TypeVar("T")
