@@ -20,6 +20,7 @@ class ConfigurationKey(Enum):
     PROJECT_ROOT = "project_root"
     SOURCE_PATH = "source_location"
     COMPILE_COMMANDS_LOCATION = "compile_commands"
+    EXCLUSION_FILTERS = "exclude_commands"
     QUIET = "quiet"
     VERBOSE = "verbose"
 

@@ -3,6 +3,7 @@ __all__ = ["CommandLineConfiguration"]
 from argparse import ArgumentParser
 import os
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
 
 from c_doc_sphinx.model import ConfigurationKey
@@ -39,6 +40,17 @@ class CommandLineConfiguration:
             "--compile-commands",
             help="A custom location for compile_commands.json. If relative, treated as relative to project root.",
             default="compile_commands.json",
+        )
+        parser.add_argument(
+            "-X",
+            "--exclude-commands",
+            help=(
+                "A set of <key>=<regexp> mappings which determine the compile commands to exclude. "
+                "Useful for filtering out commands related to build targets that you do not want in "
+                "documentation (e.g. test output)."
+            ),
+            nargs="*",
+            default=[],
         )
         parser.add_argument(
             "-v",
@@ -91,4 +103,10 @@ class CommandLineConfiguration:
             ConfigurationKey.OUTPUT_DIRECTORY: os.path.normpath(output_path.__str__()),
             ConfigurationKey.QUIET: raw_result["quiet"],
             ConfigurationKey.VERBOSE: raw_result["verbose"],
+            ConfigurationKey.EXCLUSION_FILTERS: [
+                (attribute, re.compile(expression))
+                for attribute, expression in map(
+                    lambda _s: _s.split("=", 1), raw_result["exclude_commands"]
+                )
+            ],
         }

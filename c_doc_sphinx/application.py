@@ -17,17 +17,10 @@ import ujson
 from pygments.lexers.c_cpp import CLexer
 
 from c_doc_sphinx.model import CodeDocument, Command, ConfigurationKey
-from c_doc_sphinx.utilities import handle_errors
+from c_doc_sphinx.templates import C_DOC_FILE
 
 _COMMENT_LINE_FILTER = re.compile(r"^\s*\*( |$)")
 _CLANG_OPTION_MATCHER = re.compile(r"^-(I|D)")
-
-_C_AUTODOC_TEMPLATE = dedent(
-    """
-    .. c:autodoc:: {filename_pattern}
-       :clang: {clang_options}
-    """
-).strip()
 
 
 class Application:
@@ -37,18 +30,20 @@ class Application:
     Outputs
     =======
 
-    * `<output-directory>/api.rst` -- An index of documentation for all C source files.
-    * `<output-directory>/sources/**/*.rst` -- Individual documentation files for any sources found.
+    * ``<output-directory>/api.rst`` -- A master index of documentation for all C source files.
+    * ``<output-directory>/sources/**/*.rst`` -- Individual documentation files for any sources found.
     """
 
     def __init__(self, configuration: Mapping[ConfigurationKey, Any]):
         self._configuration = configuration
         self._logger = getLogger(__name__)
+        self._lexer = CLexer()
 
     def run(self):
         """
         Executes the main application logic with the provided configuration.
         """
+        seen = set()
         with self._create_index_file() as _index:
             print("C Code Reference", file=_index)
             print("----------------", file=_index)
@@ -64,13 +59,29 @@ class Application:
                     .relative_to(self._configuration[ConfigurationKey.SOURCE_PATH])
                     .with_suffix(".rst")
                 )
-                print(f"  {code_doc_file}", file=_index)
+
+                # Skip processing if we've already seen the file.
+                if code_doc_file in seen:
+                    continue
+
+                # Prevent cases where some targets would result in duplicate code files.
+                print(f"   {code_doc_file}", file=_index)
 
                 self._logger.debug("Obtained Document: %s", pprint.pformat(document))
                 self._write_api_file(document)
                 self._logger.info("Processed %s", document.command.file)
 
+                seen.add(code_doc_file)
+
     def _create_index_file(self) -> TextIOWrapper:
+        """
+        Creates the master index file ``api.rst`` within the output location.
+        Will also create the output location if it does not already exist.
+
+        Returns:
+            A fully hydrated :any:`TextIOWrapper` allowing for output to the
+            master index file. Caller is responsible for closing this resource.
+        """
         index_path = Path(
             self._configuration[ConfigurationKey.OUTPUT_DIRECTORY]
         ).joinpath("api.rst")
@@ -79,6 +90,14 @@ class Application:
         return index_path.open("w")
 
     def _write_api_file(self, document: CodeDocument):
+        """
+        Writes a file containing documentation for a single C file discovered by scanning
+        ``compile_commands.json``.
+
+        Parameters:
+            document: The :any:`CodeDocument` containing contextual information for
+                      the source file to process.
+        """
         source_relative_path = Path(document.command.file).relative_to(
             self._configuration[ConfigurationKey.SOURCE_PATH]
         )
@@ -97,64 +116,67 @@ class Application:
         output_doc_path.parent.mkdir(exist_ok=True, parents=True)
 
         with open(output_doc_path, "w") as _f:
-            print(
-                Path(document.command.file).relative_to(
-                    self._configuration[ConfigurationKey.SOURCE_PATH]
-                )
-            )
-            print()
-            if document.overview:
-                print(
-                    "Overview",
-                    file=_f,
-                )
-                print(
-                    "========\n",
-                    file=_f,
-                )
-                print(document.overview + "\n", file=_f)
-
-            if document.public_interface_files:
-                print("Public Interface", file=_f)
-                print("================\n", file=_f)
-                print(
-                    _C_AUTODOC_TEMPLATE.format(
-                        filename_pattern=" ".join(
-                            map(str, document.public_interface_files),
-                        ),
+            _f.write(
+                C_DOC_FILE.render(
+                    dict(
+                        relative_path=Path(document.command.file)
+                        .relative_to(self._configuration[ConfigurationKey.SOURCE_PATH])
+                        .__str__(),
+                        overview=document.overview,
                         clang_options=clang_options,
+                        public_interface_files=" ".join(
+                            map(str, document.public_interface_files)
+                        ),
+                        file=str(document.command.file),
                     )
-                    + "\n",
-                    file=_f,
                 )
-
-            print("Implementation", file=_f)
-            print("==============\n", file=_f)
-            print(
-                _C_AUTODOC_TEMPLATE.format(
-                    filename_pattern=document.command.file,
-                    clang_options=clang_options,
-                ),
-                file=_f,
             )
 
     def _gen_code_documentation(self) -> Iterable[CodeDocument]:
-        for result in map(
-            lambda _c: (_c, *handle_errors(self._process_command)(_c)),
-            self._iter_commands(),
-        ):
-            if result[2] is None:
-                yield result[1]
-            else:
+        """
+        Generates a series of :any:`CodeDocument` instances containing extracted code documentation
+        context gleaned successfully from the contens of the compile commands.
+        """
+        for command in self._iter_commands():
+            try:
+                yield self._process_command(command)
+            except Exception as e:
                 self._logger.warning(
                     "Encountered error %s while processing %s. Skipping.",
-                    result[2],
-                    result[0].file,
+                    str(e),
+                    command.file,
+                    exc_info=self._configuration[ConfigurationKey.VERBOSE],
                 )
 
     def _process_command(self, command: Command) -> CodeDocument:
+        """
+        Takes in a :any:`Command` and produces a :any:`CodeDocument` containing
+        any public interface files and overview found.
+
+        Overview resolution is performed by looking for a comment that begins as the first
+        non-whitespace token of the first file in this order:
+
+        * Public Interface Files
+        * The implementation file, itself.
+
+
+        .. note::
+            At the time of writing, this method assumes that the public interface files are
+            co-located with the source file, and that they share basenames. E.g.:
+            ``src/gui/window.h`` would be a public interface file of ``src/gui/window.c``.
+
+            Since this tool is primarily for my personal use, I tend toward this convention.
+            However, a future change may allow for customization of the header resolution
+            algorithm.
+
+        Parameters:
+            command: Provides access to the source file and possible header file locations.
+
+        Returns:
+            A fully-hydrated :any:`CodeDocument` instance containing extracted overview and
+            public interface files.
+        """
         public_interface_files = []
-        lexer = CLexer()
 
         self._logger.debug("Simple header detection active.")
         if (header := Path(command.file).with_suffix(".h")).exists():
@@ -165,8 +187,8 @@ class Application:
 
         overview = ""
         for file in chain(public_interface_files, [command.file]):
-            with open(file) as _f:
-                file_tokens = lexer.get_tokens(_f.read())
+            with open(file) as _source_file:
+                file_tokens = self._lexer.get_tokens(_source_file.read())
                 possible_overview = next(
                     filter(
                         lambda _t: _t[0] != "Text.Whitespace",
@@ -190,7 +212,7 @@ class Application:
 
     def _iter_commands(self) -> Iterable[Command]:
         return filter(
-            self._determine_file_included,
+            self._command_included,
             map(
                 lambda _d: Command(
                     shlex.split(_d["command"]),
@@ -202,14 +224,19 @@ class Application:
             ),
         )
 
-    def _determine_file_included(self, command: Command) -> bool:
+    def _command_included(self, command: Command) -> bool:
         """
         Checks whether a given :any:`Command.file` should be included in the final
         result.
         """
-        return command.file.startswith(
-            self._configuration[ConfigurationKey.SOURCE_PATH]
-        )
+        return (
+            not any(
+                map(
+                    lambda _f: _f[1].match(getattr(command, _f[0], "")),
+                    self._configuration[ConfigurationKey.EXCLUSION_FILTERS],
+                )
+            )
+        ) and command.file.startswith(self._configuration[ConfigurationKey.SOURCE_PATH])
 
     @cached_property
     def _compile_commands(self) -> Mapping[str, Any]:
